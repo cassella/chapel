@@ -81,9 +81,6 @@ const HomoSapiens = [(a, 0.3029549426680),
 const stdout = openfd(1).writer(kind=iokind.native, locking=false);
 param newline = ascii("\n"): int(8);
 
-writeln("hello before main");
-stdout.flush();
-
 class WorkChunk {
   var frame: int;
   var startIdx: int;
@@ -102,7 +99,7 @@ record WorkList {
   proc append(wc: WorkChunk) {
     var wasEmpty: bool;
     lock$ = true;
-    writeln("append: got lock");
+    writeln(name, " append: got lock");
     stdout.flush();
     assert(!done, name, " append: !done");
     wasEmpty = llist.length == 0;
@@ -110,11 +107,11 @@ record WorkList {
     if (wasEmpty) {
       // wait$ should be empty since llist is empty.
       assert(!wait$.isFull, name, " append: !isFull");
-      writeln("append: clearing wait -> full");
+      writeln(name, " append: clearing wait -> full");
       stdout.flush();
       wait$ = false;
     }
-    writeln("append: releasing lock");
+    writeln(name, " append: done ", wc.frame, " length ", llist.length);
     stdout.flush();
     lock$;
   }
@@ -122,25 +119,33 @@ record WorkList {
   proc get() {
     var wc: WorkChunk;
     while (true) {
-      writeln("In get loop");
+      writeln(name, " get loop");
       stdout.flush();
       lock$ = true;
-      writeln("got lock");
+      writeln(name, " get locked, length ", llist.length);
       stdout.flush();
       if llist.length > 0 {
 	wc = llist.pop_front();
+	if llist.length == 0 {
+	  writeln(name, " emptying wait$");
+	  stdout.flush();
+	  assert(wait$.isFull);
+	  wait$;
+	}
       }
-      writeln("releasing lock");
-      stdout.flush();
       lock$;
       if wc {
-	writeln("got ", wc.frame);
+	writeln(name, " get got ", wc.frame);
 	stdout.flush();
 	return wc;
       }
       if done {
+	writeln(name, " get got done");
+	stdout.flush();
 	return nil;
       }
+      writeln(name, " get waiting");
+      stdout.flush();
       wait$.readFF();
     }
     assert(false);
@@ -149,15 +154,20 @@ record WorkList {
 
   proc setDone() {
     lock$ = true;
-    writeln("set ", name, " done");
+    writeln(name, " setDone");
+    stdout.flush();
     done = true;
-    wait$ = false;
+    assert(wait$.isFull == (llist.length > 0), name, " isFull ", wait$.isFull, " and length ", llist.length);
+    if llist.length == 0 {
+      wait$ = false;
+    }
     lock$;
   }
 
   proc reinit() {
     lock$ = true;
-    writeln("reinit ", name);
+    writeln(name, " reinit length", llist.length);
+    stdout.flush();
     done = false;
     if llist.length > 0 { // Should only be freeList
       assert(wait$.isFull);
@@ -174,12 +184,7 @@ var freeList, randList, filledList: WorkList;
 
 
 proc main() {
-  writeln("hello from main");
-  stdout.flush();
-
   allocWorkChunks();
-  writeln("alloed work chunks");
-  stdout.flush();
   
   repeatMake(">ONE Homo sapiens alu\n", ALU, 2*n);
   randomMake(">TWO IUB ambiguity codes\n", IUB, 3*n);
@@ -188,8 +193,8 @@ proc main() {
 
 proc allocWorkChunks() {
   freeList.name = "freeList";
-  randList.name = "randList";
-  filledList.name = "filledList";
+  randList.name = "                         randList";
+  filledList.name = "                                                filledList";
   for i in 1..frames {
     var wc = new WorkChunk();
     freeList.append(wc);
@@ -266,8 +271,6 @@ proc randomMake(desc, nuclInfo, n) {
     for i in 1..n by chunkSize {
       const bytes = min(chunkSize, n-i+1);
 
-      writeln("hello");
-      stdout.flush();
       var wc = freeList.get();
       assert(wc != nil);
       writeln("got a wc for rand #", frame);
@@ -291,7 +294,7 @@ proc randomMake(desc, nuclInfo, n) {
     while true {
       var wc = randList.get();
       if (wc == nil) {
-	return;
+	break;
       }
 
       var bytes = wc.length;
