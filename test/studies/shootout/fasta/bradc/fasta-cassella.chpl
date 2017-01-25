@@ -16,7 +16,7 @@ config const n = 1000,           // the length of the generated strings
              lineLength = 60,    // the number of columns in the output
              blockSize = 1024;   // the parallelization granularity
 
-config param frames = 3;         // number of pipeline frames to store
+config const frames = 3;         // number of pipeline frames to store
 
 const chunkSize = lineLength*blockSize;
 
@@ -75,6 +75,15 @@ const HomoSapiens = [(a, 0.3029549426680),
                                             (g, 0.1975473066391),
                                             (t, 0.3015094502008)];
 
+//
+// Redefine stdout to use lock-free binary I/O and capture a newline
+//
+const stdout = openfd(1).writer(kind=iokind.native, locking=false);
+param newline = ascii("\n"): int(8);
+
+writeln("hello before main");
+stdout.flush();
+
 class WorkChunk {
   var frame: int;
   var startIdx: int;
@@ -83,35 +92,50 @@ class WorkChunk {
   var line_buff: [0..(lineLength+1)*blockSize-1] int(8);
 }
 
-class WorkList {
+record WorkList {
   var llist: list(WorkChunk);
   var lock$: sync bool;
   var wait$: sync bool;
   var done: bool;
+  var name: string;
 
   proc append(wc: WorkChunk) {
     var wasEmpty: bool;
     lock$ = true;
-    wasEmpty = list.length == 0;
+    writeln("append: got lock");
+    stdout.flush();
+    assert(!done, name, " append: !done");
+    wasEmpty = llist.length == 0;
     llist.append(wc);
     if (wasEmpty) {
+      // wait$ should be empty since llist is empty.
+      assert(!wait$.isFull, name, " append: !isFull");
+      writeln("append: clearing wait -> full");
+      stdout.flush();
       wait$ = false;
     }
+    writeln("append: releasing lock");
+    stdout.flush();
     lock$;
   }
   
   proc get() {
     var wc: WorkChunk;
     while (true) {
+      writeln("In get loop");
+      stdout.flush();
       lock$ = true;
+      writeln("got lock");
+      stdout.flush();
       if llist.length > 0 {
-	wc = llist.pop_first();
-	if llist.length == 0 && !done {
-	  wait$;
-	}
+	wc = llist.pop_front();
       }
+      writeln("releasing lock");
+      stdout.flush();
       lock$;
       if wc {
+	writeln("got ", wc.frame);
+	stdout.flush();
 	return wc;
       }
       if done {
@@ -119,12 +143,29 @@ class WorkList {
       }
       wait$.readFF();
     }
+    assert(false);
+    return nil;
   }
 
   proc setDone() {
     lock$ = true;
+    writeln("set ", name, " done");
     done = true;
     wait$ = false;
+    lock$;
+  }
+
+  proc reinit() {
+    lock$ = true;
+    writeln("reinit ", name);
+    done = false;
+    if llist.length > 0 { // Should only be freeList
+      assert(wait$.isFull);
+    } else {
+      if (wait$.isFull) {
+	wait$;
+      }
+    }
     lock$;
   }
 }
@@ -133,24 +174,38 @@ var freeList, randList, filledList: WorkList;
 
 
 proc main() {
+  writeln("hello from main");
+  stdout.flush();
+
   allocWorkChunks();
+  writeln("alloed work chunks");
+  stdout.flush();
+  
   repeatMake(">ONE Homo sapiens alu\n", ALU, 2*n);
   randomMake(">TWO IUB ambiguity codes\n", IUB, 3*n);
   randomMake(">THREE Homo sapiens frequency\n", HomoSapiens, 5*n);
 }
 
 proc allocWorkChunks() {
+  freeList.name = "freeList";
+  randList.name = "randList";
+  filledList.name = "filledList";
   for i in 1..frames {
     var wc = new WorkChunk();
     freeList.append(wc);
   }
 }
 
-//
-// Redefine stdout to use lock-free binary I/O and capture a newline
-//
-const stdout = openfd(1).writer(kind=iokind.native, locking=false);
-param newline = ascii("\n"): int(8);
+proc reinitLists() {
+  writeln("reiniting lists");
+  stdout.flush();
+  freeList.reinit();
+  randList.reinit();
+  filledList.reinit();
+  writeln("lists reinited");
+  stdout.flush();
+}
+
 
 //
 // Repeat string 'str' for 'n' characters
@@ -175,7 +230,8 @@ proc randomMake(desc, nuclInfo, n) {
   const numNucls = nuclInfo.size;
 
   stdout.write(desc);
-
+  stdout.flush();
+  
   var cumul_p: [1..numNucls] int;
   //
   // Sum the probabilities of the nucleotide info
@@ -194,6 +250,10 @@ proc randomMake(desc, nuclInfo, n) {
   }
 
   assert(freeList.llist.length == frames);
+  reinitLists();
+
+  writeln("finished reinit");
+        stdout.flush();
 
   cobegin {
     computeRands();
@@ -206,9 +266,13 @@ proc randomMake(desc, nuclInfo, n) {
     for i in 1..n by chunkSize {
       const bytes = min(chunkSize, n-i+1);
 
+      writeln("hello");
+      stdout.flush();
       var wc = freeList.get();
       assert(wc != nil);
-
+      writeln("got a wc for rand #", frame);
+      stdout.flush();
+      
       wc.frame = frame;
       wc.startIdx = i;
       wc.length = bytes;
@@ -271,15 +335,15 @@ proc randomMake(desc, nuclInfo, n) {
 	return;
       }
 
-      if (wc.idx != frame + 1) {
-	writeln("Oops, got output frame ", wc.idx, " after frame ", frame);
+      if (wc.frame != frame + 1) {
+	writeln("Oops, got output frame ", wc.frame, " after frame ", frame);
 	assert(false);
       }
 
       var off = wc.length;
-      stdout.write(line_buff[frame][0..#off]);
+      stdout.write(wc.line_buff[0..#off]);
 
-      frame = wc.idx;
+      frame = wc.frame;
 
       freeList.append(wc);
     }
