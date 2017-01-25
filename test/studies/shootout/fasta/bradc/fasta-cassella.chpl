@@ -16,7 +16,7 @@ config const n = 1000,           // the length of the generated strings
              lineLength = 60,    // the number of columns in the output
              blockSize = 1024;   // the parallelization granularity
 
-config const frames = 3;         // number of pipeline frames to store
+config const frames = 5;         // number of pipeline frames to store
 
 const chunkSize = lineLength*blockSize;
 
