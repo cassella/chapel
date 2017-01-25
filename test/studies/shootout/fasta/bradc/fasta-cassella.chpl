@@ -8,12 +8,15 @@
      Kyle Brady, and Preston Sahabu.
 */
 
+use List;
+
 config const n = 1000,           // the length of the generated strings
              lineLength = 60,    // the number of columns in the output
              blockSize = 1024;   // the parallelization granularity
 
 config param frames = 3;         // number of pipeline frames to store
 
+const chunkSize = lineLength*blockSize;
 
 //
 // Nucleotide definitions
@@ -70,11 +73,75 @@ const HomoSapiens = [(a, 0.3029549426680),
                                             (g, 0.1975473066391),
                                             (t, 0.3015094502008)];
 
+class WorkChunk {
+  var frame: int;
+  var startIdx: int;
+  var length: int;
+  var rands: [0..chunkSize] int/*(32)*/;
+  var line_buff: [0..(lineLength+1)*blockSize-1] int(8);
+}
+
+class WorkList {
+  var llist: list(WorkChunk);
+  var lock$: sync bool;
+  var wait$: sync bool;
+  var done: bool;
+
+  proc append(wc: WorkChunk) {
+    var wasEmpty: bool;
+    lock$ = true;
+    wasEmpty = list.length == 0;
+    llist.append(wc);
+    if (wasEmpty) {
+      wait$ = false;
+    }
+    lock$;
+  }
+  
+  proc get() {
+    var wc: WorkChunk;
+    while (true) {
+      lock$ = true;
+      if llist.length > 0 {
+	wc = llist.pop_first();
+	if llist.length == 0 && !done {
+	  wait$;
+	}
+      }
+      lock$;
+      if wc {
+	return wc;
+      }
+      if done {
+	return nil;
+      }
+      wait$.readFF();
+    }
+  }
+
+  proc setDone() {
+    lock$ = true;
+    done = true;
+    wait$ = false;
+    lock$;
+  }
+}
+
+var freeList, randList, filledList: WorkList;
+
 
 proc main() {
+  allocWorkChunks();
   repeatMake(">ONE Homo sapiens alu\n", ALU, 2*n);
   randomMake(">TWO IUB ambiguity codes\n", IUB, 3*n);
   randomMake(">THREE Homo sapiens frequency\n", HomoSapiens, 5*n);
+}
+
+proc allocWorkChunks() {
+  for i in 1..frames {
+    var wc = new WorkChunk();
+    freeList.append(wc);
+  }
 }
 
 //
@@ -117,24 +184,14 @@ proc randomMake(desc, nuclInfo, n) {
     cumul_p[i] = 1 + (p*IM):int;
   }
 
-  /*
-  for i in 0..#numTasks {
-    randGo[i].write(1);
-    outGo[i].write(1);
-  }
-*/
 
-  const chunkSize = lineLength*blockSize;
-
-  var line_buff: [0..#frames] [0..(lineLength+1)*blockSize-1] int(8);
-  var rands: [0..#frames] [0..chunkSize] int/*(32)*/;
-  var randGo, computeGo, writeGo: [0..#frames] atomic int;
-
-  randGo.write(1);
-
+  if false {
   if (here.maxTaskPar < 3) then
-    writef("Warning: This code uses busy waiting and 3 tasks, so may deadlock",
+    writef("Warning: This code uses busy waiting and 3 tasks, so may deadlock"+
            " since here.maxTaskPar = %i", here.maxTaskPar);
+  }
+
+  assert(freeList.llist.length == frames);
 
   cobegin {
     computeRands();
@@ -145,40 +202,37 @@ proc randomMake(desc, nuclInfo, n) {
   proc computeRands() {
     var frame = 0;
     for i in 1..n by chunkSize {
-      //      stderr.writef("computeRands waiting on frame %i\n", frame);
-      while (randGo[frame].read() != 1) do ;
-      //      stderr.writef("computeRands resetting frame %i\n", frame);
-      randGo[frame].write(0);
-
       const bytes = min(chunkSize, n-i+1);
-      getRands(bytes, rands[frame]);
 
-      //      stderr.writef("computeRands writing %i to computeGo[%i]\n", bytes, frame);
-      computeGo[frame].write(bytes);
+      var wc = freeList.get();
+      assert(wc != nil);
+
+      wc.frame = frame;
+      wc.startIdx = i;
+      wc.length = bytes;
+
+      getRands(bytes, wc.rands);
+
+      randList.append(wc);
 
       frame += 1;
-      frame %= frames;
     }
-    //    stderr.writef("computeRands writing -1 to computeGo[%i]\n", frame);
-    computeGo[frame].write(-1);
+    randList.setDone();
   }
 
   proc computeLines() {
     var frame = 0;
     while true {
-      //      stderr.writef("computeLines waiting on frame %i\n", frame);
-      var bytes = 0;
-      while bytes == 0 do
-        bytes = computeGo[frame].read();
-      //      stderr.writef("computeLines read %i\n", bytes);
-      if bytes == -1 then break;
-      //      stderr.writef("computeLines resetting frame %i\n", frame);
-      computeGo[frame].write(0);
-      
+      var wc = randList.get();
+      if (wc == nil) {
+	return;
+      }
+
+      var bytes = wc.length;
       var col = 0;
       var off = 0;
-      ref myRands = rands[frame],
-          myBuff = line_buff[frame];
+      ref myRands = wc.rands,
+	  myBuff = wc.line_buff;
       for i in 0..#bytes {
         const r = myRands[i];
         var ncnt = 1;
@@ -201,32 +255,31 @@ proc randomMake(desc, nuclInfo, n) {
         off += 1;
       }
 
-      //      stderr.writef("computeLines setting writeGo[%i] to 1\n", frame);
-      writeGo[frame].write(off);
-
-      frame += 1;
-      frame %= frames;
+      wc.length = off;
+      filledList.append(wc);
     }
-    //    stderr.writef("computeLines setting writeGo[%i] to -1\n", frame);
-    writeGo[frame].write(-1);
-  }
+    filledList.setDone();
+}
 
   proc writeLines() {
-    var frame = 0;
+    var frame = -1;
     while true {
-      var off = 0;
-      //      stderr.writef("writeLines waiting on frame %i\n", frame);
-      while off == 0 do
-        off = writeGo[frame].read();
-      if off == -1 then break;
-      //      stderr.writef("writeLines resetting writeGo[%i]\n", frame);
-      writeGo[frame].write(0);
+      var wc = filledList.get();
+      if (wc == nil) {
+	return;
+      }
 
+      if (wc.idx != frame + 1) {
+	writeln("Oops, got output frame ", wc.idx, " after frame ", frame);
+	assert(false);
+      }
+
+      var off = wc.length;
       stdout.write(line_buff[frame][0..#off]);
 
-      //      stderr.writef("writeLines setting randGo[%i] to 1\n", frame);
-      frame = (frame+1)%frames;
-      randGo[frame].write(1);
+      frame = wc.idx;
+
+      freeList.append(wc);
     }
   }
 }
