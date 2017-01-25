@@ -8,6 +8,8 @@
      Kyle Brady, and Preston Sahabu.
 */
 
+// based on a cobegin-based fasta-blc
+
 use List;
 
 config const n = 1000,           // the length of the generated strings
