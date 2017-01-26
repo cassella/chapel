@@ -97,17 +97,44 @@ record WorkList {
   var wait$: sync bool;
   var done: bool;
   var name: string;
+  var ordered = false;
+  var lastFrame = -1; // last frame returned
 
+
+  // XXX List.list doesn't support an "insert_after()", can only add
+  // at the beginning or end.  So we can't maintain llist as an
+  // ordered list.  Instead, append each new wc (unless its frame is <
+  // the llist first item's frame, in which case prepend it.)
+  // Then do more work at get() time.
   proc append(wc: WorkChunk) {
+    // The WorkList lock is held, put this wc on llist.
+    proc _append(wc: WorkChunk) {
+      if ordered && llist.length > 0 {
+	var atStart: bool;
+	for first in llist {
+	  if wc.frame < first.frame {
+	    atStart = true;
+	  } else {
+	    atStart = false;
+	  }
+	  break;
+	}
+	if (atStart) {
+	  llist.prepend(wc);
+	} else {
+	  llist.append(wc);
+	}
+      } else {
+	llist.append(wc);
+      }
+    }
     var wasEmpty: bool;
     lock$ = true;
     debug(name, " append: got lock");
     debugAssert(!done, name, " append: !done");
-    wasEmpty = llist.length == 0;
-    llist.append(wc);
-    if (wasEmpty) {
-      // wait$ should be empty since llist is empty.
-      debugAssert(!wait$.isFull, name, " append: !isFull");
+    var needsWake = !wait$.isFull; // could be due to llist empty, or out-of-order
+    _append(wc);
+    if (needsWake) {
       debug(name, " append: clearing wait -> full");
       wait$ = false;
     }
@@ -116,18 +143,40 @@ record WorkList {
   }
   
   proc get() {
+    proc _get() {
+      var wc: WorkChunk;
+      if ordered {
+	var i: WorkChunk;
+	for i in llist {
+	  if i.frame == lastFrame + 1 {
+	    wc = i;
+	    break;
+	  }
+	}
+	if wc != nil {
+	  llist.remove(wc);
+	}
+      } else {
+	wc = llist.pop_front();
+      }
+      if llist.length == 0 || (wait$.isFull && wc == nil) {
+	debug(name, " emptying wait$");
+	debugAssert(wait$.isFull);
+	wait$;
+      }
+      if wc != nil {
+	lastFrame = wc.frame;
+      }
+      return wc;
+    }
+
     var wc: WorkChunk;
     while (true) {
       debug(name, " get loop");
       lock$ = true;
       debug(name, " get locked, length ", llist.length);
       if llist.length > 0 {
-	wc = llist.pop_front();
-	if llist.length == 0 {
-	  debug(name, " emptying wait$");
-	  debugAssert(wait$.isFull);
-	  wait$;
-	}
+	wc = _get();
       }
       lock$;
       if wc {
@@ -167,11 +216,15 @@ record WorkList {
 	wait$;
       }
     }
+    if ordered {
+      lastFrame = -1;
+    }
     lock$;
   }
 }
 
 var freeList, randList, filledList: WorkList;
+filledList.ordered = true;
 
 proc main() {
   allocWorkChunks();
