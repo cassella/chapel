@@ -102,12 +102,12 @@ record WorkList {
     var wasEmpty: bool;
     lock$ = true;
     debug(name, " append: got lock");
-    assert(!done, name, " append: !done");
+    debugAssert(!done, name, " append: !done");
     wasEmpty = llist.length == 0;
     llist.append(wc);
     if (wasEmpty) {
       // wait$ should be empty since llist is empty.
-      assert(!wait$.isFull, name, " append: !isFull");
+      debugAssert(!wait$.isFull, name, " append: !isFull");
       debug(name, " append: clearing wait -> full");
       wait$ = false;
     }
@@ -125,7 +125,7 @@ record WorkList {
 	wc = llist.pop_front();
 	if llist.length == 0 {
 	  debug(name, " emptying wait$");
-	  assert(wait$.isFull);
+	  debugAssert(wait$.isFull);
 	  wait$;
 	}
       }
@@ -149,7 +149,7 @@ record WorkList {
     lock$ = true;
     debug(name, " setDone");
     done = true;
-    assert(wait$.isFull == (llist.length > 0), name, " isFull ", wait$.isFull, " and length ", llist.length);
+    debugAssert(wait$.isFull == (llist.length > 0), name, " isFull ", wait$.isFull, " and length ", llist.length);
     if llist.length == 0 {
       wait$ = false;
     }
@@ -161,7 +161,7 @@ record WorkList {
     debug(name, " reinit length", llist.length);
     done = false;
     if llist.length > 0 { // Should only be freeList
-      assert(wait$.isFull);
+      debugAssert(wait$.isFull);
     } else {
       if (wait$.isFull) {
 	wait$;
@@ -250,7 +250,7 @@ proc randomMake(desc, nuclInfo, n) {
            " since here.maxTaskPar = %i", here.maxTaskPar);
   }
 
-  assert(freeList.llist.length == frames);
+  debugAssert(freeList.llist.length == frames);
   reinitLists();
 
   debug("finished reinit");
@@ -267,7 +267,7 @@ proc randomMake(desc, nuclInfo, n) {
       const bytes = min(chunkSize, n-i+1);
 
       var wc = freeList.get();
-      assert(wc != nil);
+      debugAssert(wc != nil);
       debug("got a wc for rand #", frame);
       
       wc.frame = frame;
@@ -370,5 +370,11 @@ inline proc debug(x ... ?k) {
   if debugFasta {
     writeln((... x));
     stdout.flush();
+  }
+}
+
+inline proc debugAssert(x ... ?k) {
+  if debugFasta {
+    assert((...x));
   }
 }
