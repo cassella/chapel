@@ -100,6 +100,7 @@ record WorkList {
   var name: string;
   var ordered = false;
   var lastFrame = -1; // last frame returned
+  var framesRemaining: int; // frames left before this list is done
 
 
   // XXX List.list doesn't support an "insert_after()", can only add
@@ -132,7 +133,7 @@ record WorkList {
     var wasEmpty: bool;
     lock$ = true;
     debug(name, " append: got lock");
-    debugAssert(!done, name, " append: !done");
+    //    debugAssert(!done, name, " append: !done"); doesn't apply to freeList now
     var needsWake = !wait$.isFull; // could be due to llist empty, or out-of-order
     _append(wc);
     if (needsWake) {
@@ -167,6 +168,10 @@ record WorkList {
       }
       if wc != nil {
 	lastFrame = wc.frame;
+	framesRemaining -= 1;
+	if (framesRemaining == 0) {
+	  _setDone();
+	}
       }
       return wc;
     }
@@ -199,21 +204,20 @@ record WorkList {
     return nil;
   }
 
-  proc setDone() {
-    lock$ = true;
-    debug(name, " setDone");
+  proc _setDone() {
+    debug(name, " _setDone");
     done = true;
     debugAssert(wait$.isFull == (llist.length > 0), name, " isFull ", wait$.isFull, " and length ", llist.length);
     if llist.length == 0 {
       wait$ = false;
     }
-    lock$;
   }
 
   proc reinit() {
     lock$ = true;
     debug(name, " reinit length", llist.length);
     done = false;
+    framesRemaining = (n + chunkSize - 1) / chunkSize;
     if llist.length > 0 { // Should only be freeList
       debugAssert(wait$.isFull);
     } else {
@@ -345,7 +349,6 @@ proc randomMake(desc, nuclInfo, n) {
 
       frame += 1;
     }
-    randList.setDone();
   }
 
   proc computeLines() {
@@ -386,7 +389,6 @@ proc randomMake(desc, nuclInfo, n) {
       wc.length = off;
       filledList.append(wc);
     }
-    filledList.setDone();
 }
 
   proc writeLines() {
