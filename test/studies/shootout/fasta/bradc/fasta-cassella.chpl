@@ -17,6 +17,7 @@ config const n = 1000,           // the length of the generated strings
              blockSize = 1024;   // the parallelization granularity
 
 config const frames = 5;         // number of pipeline frames to store
+var allocated_frames = 0;
 
 const chunkSize = lineLength*blockSize;
 
@@ -142,7 +143,7 @@ record WorkList {
     lock$;
   }
   
-  proc get() {
+  proc get(blocking = true) {
     proc _get() {
       var wc: WorkChunk;
       if ordered {
@@ -185,6 +186,10 @@ record WorkList {
       }
       if done {
 	debug(name, " get got done");
+	return nil;
+      }
+      if !blocking {
+	debug(name, " get not blocking");
 	return nil;
       }
       debug(name, " get waiting");
@@ -232,6 +237,8 @@ proc main() {
   repeatMake(">ONE Homo sapiens alu\n", ALU, 2*n);
   randomMake(">TWO IUB ambiguity codes\n", IUB, 3*n);
   randomMake(">THREE Homo sapiens frequency\n", HomoSapiens, 5*n);
+
+  debug("needed to allocate ", allocated_frames, " extra frames");
 }
 
 proc allocWorkChunks() {
@@ -303,7 +310,7 @@ proc randomMake(desc, nuclInfo, n) {
            " since here.maxTaskPar = %i", here.maxTaskPar);
   }
 
-  debugAssert(freeList.llist.length == frames);
+  debugAssert(freeList.llist.length == frames + allocated_frames);
   reinitLists();
 
   debug("finished reinit");
@@ -319,7 +326,12 @@ proc randomMake(desc, nuclInfo, n) {
     for i in 1..n by chunkSize {
       const bytes = min(chunkSize, n-i+1);
 
-      var wc = freeList.get();
+      var wc = freeList.get(blocking = false);
+      if (wc == nil) {
+	debug("allocating new wc");
+	wc = new WorkChunk();
+	allocated_frames += 1;
+      }
       debugAssert(wc != nil);
       debug("got a wc for rand #", frame);
       
