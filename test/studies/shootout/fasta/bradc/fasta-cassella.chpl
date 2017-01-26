@@ -214,11 +214,11 @@ record WorkList {
     }
   }
 
-  proc reinit() {
+  proc reinit(n: int) {
     lock$ = true;
     debug(name, " reinit length", llist.length);
     done = false;
-    framesRemaining = (n + chunkSize - 1) / chunkSize;
+    framesRemaining = n;
     if llist.length > 0 { // Should only be freeList
       debugAssert(wait$.isFull);
     } else {
@@ -264,11 +264,11 @@ proc allocWorkChunks() {
   }
 }
 
-proc reinitLists() {
+proc reinitLists(n: int) {
   debug("reiniting lists");
-  freeList.reinit();
-  randList.reinit();
-  filledList.reinit();
+  freeList.reinit(n);
+  randList.reinit(n);
+  filledList.reinit(n);
   debug("lists reinited");
 }
 
@@ -316,7 +316,7 @@ proc randomMake(desc, nuclInfo, n) {
   }
 
   debugAssert(freeList.llist.length == frames + allocated_frames);
-  reinitLists();
+  reinitLists((n + chunkSize - 1)/chunkSize);
 
   debug("finished reinit");
 
