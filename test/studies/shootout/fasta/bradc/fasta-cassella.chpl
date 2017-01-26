@@ -163,7 +163,7 @@ record WorkList {
       }
       if llist.length == 0 || (wait$.isFull && wc == nil) {
 	debug(name, " emptying wait$");
-	debugAssert(wait$.isFull);
+	debugAssert(wait$.isFull, name, " wait$ not full");
 	wait$;
       }
       if wc != nil {
@@ -172,6 +172,7 @@ record WorkList {
 	if (framesRemaining == 0) {
 	  _setDone();
 	}
+	debug(name, " get returning ", wc.frame, ", remaining: ", framesRemaining);
       }
       return wc;
     }
@@ -328,9 +329,11 @@ proc randomMake(desc, nuclInfo, n) {
 
   proc computeRands() {
     var frame = 0;
+    debug("computeRands: 1..", n, " by ", chunkSize);
     for i in 1..n by chunkSize {
       const bytes = min(chunkSize, n-i+1);
 
+      debug("computeRands: i ", i, " bytes ", bytes);
       var wc = freeList.get(blocking = false);
       if (wc == nil) {
 	debug("allocating new wc");
@@ -401,8 +404,7 @@ proc randomMake(desc, nuclInfo, n) {
       }
 
       if (wc.frame != frame + 1) {
-	writeln("Oops, got output frame ", wc.frame, " after frame ", frame);
-	assert(false);
+	assert(false, "Oops, got output frame ", wc.frame, " after frame ", frame);
       }
 
       var off = wc.length;
@@ -436,8 +438,8 @@ proc getRands(n, arr) {
 
 inline proc debug(x ... ?k) {
   if debugFasta {
-    writeln((... x));
-    stdout.flush();
+    stderr.writeln((... x));
+    stderr.flush();
   }
 }
 
