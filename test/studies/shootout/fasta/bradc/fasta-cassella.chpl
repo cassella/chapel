@@ -20,6 +20,8 @@ config const frames = 5;         // number of pipeline frames to store
 
 const chunkSize = lineLength*blockSize;
 
+config param debugFasta = false;
+
 //
 // Nucleotide definitions
 //
@@ -99,53 +101,44 @@ record WorkList {
   proc append(wc: WorkChunk) {
     var wasEmpty: bool;
     lock$ = true;
-    writeln(name, " append: got lock");
-    stdout.flush();
+    debug(name, " append: got lock");
     assert(!done, name, " append: !done");
     wasEmpty = llist.length == 0;
     llist.append(wc);
     if (wasEmpty) {
       // wait$ should be empty since llist is empty.
       assert(!wait$.isFull, name, " append: !isFull");
-      writeln(name, " append: clearing wait -> full");
-      stdout.flush();
+      debug(name, " append: clearing wait -> full");
       wait$ = false;
     }
-    writeln(name, " append: done ", wc.frame, " length ", llist.length);
-    stdout.flush();
+    debug(name, " append: done ", wc.frame, " length ", llist.length);
     lock$;
   }
   
   proc get() {
     var wc: WorkChunk;
     while (true) {
-      writeln(name, " get loop");
-      stdout.flush();
+      debug(name, " get loop");
       lock$ = true;
-      writeln(name, " get locked, length ", llist.length);
-      stdout.flush();
+      debug(name, " get locked, length ", llist.length);
       if llist.length > 0 {
 	wc = llist.pop_front();
 	if llist.length == 0 {
-	  writeln(name, " emptying wait$");
-	  stdout.flush();
+	  debug(name, " emptying wait$");
 	  assert(wait$.isFull);
 	  wait$;
 	}
       }
       lock$;
       if wc {
-	writeln(name, " get got ", wc.frame);
-	stdout.flush();
+	debug(name, " get got ", wc.frame);
 	return wc;
       }
       if done {
-	writeln(name, " get got done");
-	stdout.flush();
+	debug(name, " get got done");
 	return nil;
       }
-      writeln(name, " get waiting");
-      stdout.flush();
+      debug(name, " get waiting");
       wait$.readFF();
     }
     assert(false);
@@ -154,8 +147,7 @@ record WorkList {
 
   proc setDone() {
     lock$ = true;
-    writeln(name, " setDone");
-    stdout.flush();
+    debug(name, " setDone");
     done = true;
     assert(wait$.isFull == (llist.length > 0), name, " isFull ", wait$.isFull, " and length ", llist.length);
     if llist.length == 0 {
@@ -166,8 +158,7 @@ record WorkList {
 
   proc reinit() {
     lock$ = true;
-    writeln(name, " reinit length", llist.length);
-    stdout.flush();
+    debug(name, " reinit length", llist.length);
     done = false;
     if llist.length > 0 { // Should only be freeList
       assert(wait$.isFull);
@@ -182,7 +173,6 @@ record WorkList {
 
 var freeList, randList, filledList: WorkList;
 
-
 proc main() {
   allocWorkChunks();
   
@@ -192,9 +182,17 @@ proc main() {
 }
 
 proc allocWorkChunks() {
-  freeList.name = "freeList";
-  randList.name = "                         randList";
-  filledList.name = "                                                filledList";
+  if debugFasta {
+    // Line up the names printed in debug messages.
+    freeList.name = "freeList";
+    randList.name = "                         randList";
+    filledList.name = "                                                filledList";
+  } else {
+    freeList.name = "freeList";
+    randList.name = "randList";
+    filledList.name = "filledList";
+  }
+  
   for i in 1..frames {
     var wc = new WorkChunk();
     freeList.append(wc);
@@ -202,13 +200,11 @@ proc allocWorkChunks() {
 }
 
 proc reinitLists() {
-  writeln("reiniting lists");
-  stdout.flush();
+  debug("reiniting lists");
   freeList.reinit();
   randList.reinit();
   filledList.reinit();
-  writeln("lists reinited");
-  stdout.flush();
+  debug("lists reinited");
 }
 
 
@@ -257,8 +253,7 @@ proc randomMake(desc, nuclInfo, n) {
   assert(freeList.llist.length == frames);
   reinitLists();
 
-  writeln("finished reinit");
-        stdout.flush();
+  debug("finished reinit");
 
   cobegin {
     computeRands();
@@ -273,8 +268,7 @@ proc randomMake(desc, nuclInfo, n) {
 
       var wc = freeList.get();
       assert(wc != nil);
-      writeln("got a wc for rand #", frame);
-      stdout.flush();
+      debug("got a wc for rand #", frame);
       
       wc.frame = frame;
       wc.startIdx = i;
@@ -367,5 +361,14 @@ proc getRands(n, arr) {
   for i in 0..#n {
     lastRand = (lastRand * IA + IC) % IM;
     arr[i] = lastRand;
+  }
+}
+
+
+
+inline proc debug(x ... ?k) {
+  if debugFasta {
+    writeln((... x));
+    stdout.flush();
   }
 }
