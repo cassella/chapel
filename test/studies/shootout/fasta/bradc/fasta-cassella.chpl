@@ -322,6 +322,7 @@ proc randomMake(desc, nuclInfo, n) {
   cobegin {
     computeRands();
     computeLines();
+    computeLines();
     writeLines();
   }
 
