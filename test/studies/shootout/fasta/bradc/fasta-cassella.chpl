@@ -21,6 +21,7 @@ var allocated_frames = 0;
 
 const chunkSize = lineLength*blockSize;
 
+config param spinLocking = true;
 config param debugFasta = false;
 
 //
@@ -94,14 +95,66 @@ class WorkChunk {
 
 record WorkList {
   var llist: list(WorkChunk);
-  var lock$: sync bool;
-  var wait$: sync bool;
+  var _lock$: sync bool;
+  var _wait$: sync bool;
+  var _lock: atomic(bool);
+  var _wait: atomic(int);
   var done: bool;
   var name: string;
   var ordered = false;
   var lastFrame = -1; // last frame returned
   var framesRemaining: int; // frames left before this list is done
 
+  proc lock() {
+    if spinLocking {
+      do {
+	_lock.waitFor(false);
+      } while(!_lock.compareExchange(false, true));
+    } else {
+      _lock$ = true;
+    }
+  }
+
+  proc unlock() {
+    if spinLocking {
+      _lock.write(false);
+    } else {
+      _lock$;
+    }
+  }
+
+
+  proc wait() {
+    if spinLocking {
+      _wait.waitFor(1);
+    } else {
+      _wait$.readFF();
+    }
+  }
+
+  proc allowGetters() {
+    if spinLocking {
+      _wait.write(1);
+    } else {
+      _wait$ = false;
+    }
+  }
+
+  proc forbidGetters() {
+    if spinLocking {
+      _wait.write(0);
+    } else {
+      _wait$;
+    }
+  }
+
+  proc gettersAllowed() : bool {
+    if spinLocking {
+      return _wait.read() == 1;
+    } else {
+      return _wait$.isFull;
+    }
+  }
 
   // XXX List.list doesn't support an "insert_after()", can only add
   // at the beginning or end.  So we can't maintain llist as an
@@ -131,19 +184,19 @@ record WorkList {
       }
     }
     var wasEmpty: bool;
-    lock$ = true;
+    lock();
     debug(name, " append: got lock");
     //    debugAssert(!done, name, " append: !done"); doesn't apply to freeList now
-    var needsWake = !wait$.isFull; // could be due to llist empty, or out-of-order
+    var needsWake = !gettersAllowed(); // could be due to llist empty, or out-of-order
     _append(wc);
     if (needsWake) {
-      debug(name, " append: clearing wait -> full");
-      wait$ = false;
+      debug(name, " append: waking waiters");
+      allowGetters();
     }
     debug(name, " append: done ", wc.frame, " length ", llist.length);
-    lock$;
+    unlock();
   }
-  
+    
   proc get(blocking = true) {
     proc _get() {
       var wc: WorkChunk;
@@ -161,10 +214,10 @@ record WorkList {
       } else {
 	wc = llist.pop_front();
       }
-      if llist.length == 0 || (wait$.isFull && wc == nil) {
-	debug(name, " emptying wait$");
-	debugAssert(wait$.isFull, name, " wait$ not full");
-	wait$;
+      if llist.length == 0 || (gettersAllowed() && wc == nil) {
+	debug(name, " forbidding Getters");
+	debugAssert(gettersAllowed(), name, " wait$ not full");
+	forbidGetters();
       }
       if wc != nil {
 	lastFrame = wc.frame;
@@ -180,12 +233,12 @@ record WorkList {
     var wc: WorkChunk;
     while (true) {
       debug(name, " get loop");
-      lock$ = true;
+      lock();
       debug(name, " get locked, length ", llist.length);
       if llist.length > 0 {
 	wc = _get();
       }
-      lock$;
+      unlock();
       if wc {
 	debug(name, " get got ", wc.frame);
 	return wc;
@@ -199,7 +252,7 @@ record WorkList {
 	return nil;
       }
       debug(name, " get waiting");
-      wait$.readFF();
+      wait();
     }
     assert(false);
     return nil;
@@ -208,28 +261,31 @@ record WorkList {
   proc _setDone() {
     debug(name, " _setDone");
     done = true;
-    debugAssert(wait$.isFull == (llist.length > 0), name, " isFull ", wait$.isFull, " and length ", llist.length);
+    debugAssert(gettersAllowed() == (llist.length > 0),
+		name, " gettersAllowed: ", gettersAllowed(),
+		" and length ", llist.length);
     if llist.length == 0 {
-      wait$ = false;
+      allowGetters();
     }
   }
 
   proc reinit(n: int) {
-    lock$ = true;
+    debug(name, " reinit");
+    lock();
     debug(name, " reinit length", llist.length);
     done = false;
     framesRemaining = n;
     if llist.length > 0 { // Should only be freeList
-      debugAssert(wait$.isFull);
+      debugAssert(gettersAllowed());
     } else {
-      if (wait$.isFull) {
-	wait$;
+      if (gettersAllowed()) {
+	forbidGetters();
       }
     }
     if ordered {
       lastFrame = -1;
     }
-    lock$;
+    unlock();
   }
 }
 
@@ -309,11 +365,9 @@ proc randomMake(desc, nuclInfo, n) {
   }
 
 
-  if false {
-  if (here.maxTaskPar < 3) then
-    writef("Warning: This code uses busy waiting and 3 tasks, so may deadlock"+
+  if spinLocking && here.maxTaskPar < 4 then
+    writef("Warning: This code uses busy waiting and 4 tasks, so may deadlock"+
            " since here.maxTaskPar = %i", here.maxTaskPar);
-  }
 
   debugAssert(freeList.llist.length == frames + allocated_frames);
   reinitLists((n + chunkSize - 1)/chunkSize);
